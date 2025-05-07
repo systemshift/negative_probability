@@ -46,10 +46,10 @@ def main():
         "q_init_val": 0.0,
         "backward_epsilon": 0.01,   # eps for backward update
         "softmax_temp": 0.5,        # Temperature for softmax action selection
-        "p_backward_jump": 0.1,     # Probability of attempting a backward jump
+        # "p_backward_jump": 0.1,   # No longer used by QPAgent, jump decision is now based on sampled Q-value sign
         "min_trajectory_for_jump": 3 # Min trajectory length to consider a jump (e.g. S0->S1->S2, now at S2, can jump to S0)
     }
-    agent = QPAgent(env, **agent_config)
+    agent = QPAgent(env, **agent_config) # p_backward_jump will be ignored by QPAgent if not in its __init__ signature, or use its default
 
     # --- Training Parameters ---
     num_episodes = 1000

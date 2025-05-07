@@ -7,7 +7,7 @@ class QPAgent:
                  exploration_rate=1.0, exploration_decay=0.995, 
                  min_exploration_rate=0.01, q_init_val=0.0, 
                  backward_epsilon=0.01, softmax_temp=1.0,
-                 p_backward_jump=0.1, min_trajectory_for_jump=2):
+                 min_trajectory_for_jump=2): # p_backward_jump removed
         """
         Quasi-Probability Reinforcement Learning Agent.
 
@@ -23,19 +23,18 @@ class QPAgent:
                                      abs(q[sp][ap]) will tend towards this value for past states.
             softmax_temp (float): Temperature parameter for softmax action selection.
                                   Higher temp = more randomness, Lower temp = more greedy.
-            p_backward_jump (float): Probability of attempting a backward jump during exploitation.
             min_trajectory_for_jump (int): Minimum length of trajectory_history to consider a jump.
         """
         self.env = env
         self.alpha = alpha
-        self.gamma = gamma # Note: gamma is not used in the readme's simple forward update
+        self.gamma = gamma
         self.exploration_rate = exploration_rate
         self.exploration_decay = exploration_decay
         self.min_exploration_rate = min_exploration_rate
         self.q_init_val = q_init_val
         self.backward_epsilon = backward_epsilon
         self.softmax_temp = softmax_temp
-        self.p_backward_jump = p_backward_jump
+        # self.p_backward_jump = p_backward_jump # No longer used
         self.min_trajectory_for_jump = min_trajectory_for_jump
 
         # Q-table: stores q(s,a) which are real numbers.
@@ -67,61 +66,75 @@ class QPAgent:
             # Explore: choose a random environment action
             return random.randrange(self.action_space_size)
         else:
-            # Exploit:
-            # With p_backward_jump, attempt a backward jump
-            if trajectory_history and \
-               len(trajectory_history) >= self.min_trajectory_for_jump and \
-               random.random() < self.p_backward_jump:
-                
-                candidate_jumps = [] # List of (past_state, q_value_of_past_s_a)
-                # Iterate up to the second to last entry, as the last entry is the current state's precursor
-                for i in range(len(trajectory_history) -1): 
-                    past_s, past_a, _ = trajectory_history[i]
-                    q_val_past_sa = self.q_table[past_s][past_a]
-                    
-                    # We are looking for past state-actions that are "plausible pasts".
-                    # The backward update drives q[sp][ap] towards -self.backward_epsilon.
-                    if q_val_past_sa < 0: # Consider only negative Q-values for past plausibility
-                        # Store the state `past_s` to jump to, and its "score"
-                        # Score: how close q_val_past_sa is to -self.backward_epsilon
-                        # Lower score (closer to 0 difference) is better.
-                        score = abs(q_val_past_sa - (-self.backward_epsilon))
-                        candidate_jumps.append({'state_to_jump_to': past_s, 'score': score, 'original_q': q_val_past_sa})
-                
-                if candidate_jumps:
-                    # Select the jump candidate with the best (lowest) score
-                    candidate_jumps.sort(key=lambda x: x['score'])
-                    best_jump_target_state = candidate_jumps[0]['state_to_jump_to']
-                    # print(f"DEBUG: Attempting jump to {best_jump_target_state} from history (score: {candidate_jumps[0]['score']:.3f}, q:{candidate_jumps[0]['original_q']:.3f})")
-                    return ("JUMP", best_jump_target_state)
-
-            # If not jumping, or jump attempt failed, proceed with forward action selection (softmax)
+            # Exploit: Implement "sample_qp" logic more directly.
+            # 1. Sample an action `a_sampled` using softmax over q_table[state].
+            # 2. Check the sign of q_table[state][a_sampled].
+            #    - If positive (or non-negative), take action `a_sampled` forward.
+            #    - If negative, trigger a backward jump.
+            
             state_q_values_dict = self.q_table[state]
             if not state_q_values_dict: 
                 return random.randrange(self.action_space_size)
 
             actions = list(state_q_values_dict.keys())
-            # Consider only non-negative Q-values for forward softmax, or all if none are non-negative?
-            # For now, use all Q-values for softmax as per "shift-softmax over positive+negative" idea.
-            # The "shift" is not yet implemented, so it's direct softmax.
             q_values = np.array([state_q_values_dict[a] for a in actions])
 
-            if self.softmax_temp <= 0: # Avoid division by zero; behave greedily
+            sampled_action_idx = -1
+            if self.softmax_temp <= 0: # Greedy selection
                 max_q = np.max(q_values)
-                # Ensure actions is not empty before choice
-                best_actions = [actions[i] for i, q_val in enumerate(q_values) if q_val == max_q]
-                return random.choice(best_actions) if best_actions else random.randrange(self.action_space_size)
+                best_action_indices = [i for i, q_val in enumerate(q_values) if q_val == max_q]
+                if not best_action_indices: # Should not happen if actions is not empty
+                    return random.randrange(self.action_space_size)
+                sampled_action_idx = random.choice(best_action_indices)
+            else: # Softmax selection
+                q_values_stable = q_values - np.max(q_values) 
+                exp_q_values = np.exp(q_values_stable / self.softmax_temp)
+                probs = exp_q_values / np.sum(exp_q_values)
+                
+                if np.isclose(np.sum(probs), 0.0) or not np.all(np.isfinite(probs)) or len(actions)==0:
+                    return random.randrange(self.action_space_size) # Fallback
+                
+                # Choose an index based on probabilities
+                sampled_action_idx = np.random.choice(len(actions), p=probs)
 
+            if sampled_action_idx == -1: # Should not be reached if logic above is correct
+                 return random.randrange(self.action_space_size)
 
-            q_values_stable = q_values - np.max(q_values) 
-            exp_q_values = np.exp(q_values_stable / self.softmax_temp)
-            probs = exp_q_values / np.sum(exp_q_values)
+            a_sampled = actions[sampled_action_idx]
+            q_original_sampled = state_q_values_dict[a_sampled]
+
+            # "Positive draws move forward; negative draws trigger a jump"
+            # Let's define "positive draw" as q_original_sampled >= 0 (or a small positive threshold like self.backward_epsilon)
+            # and "negative draw" as q_original_sampled < 0 (or below -self.backward_epsilon)
             
-            if np.isclose(np.sum(probs), 0.0) or not np.all(np.isfinite(probs)) or len(actions)==0:
-                return random.randrange(self.action_space_size)
-
-            chosen_action = random.choices(actions, weights=probs, k=1)[0]
-            return chosen_action
+            # For now, simple >= 0 check for forward.
+            if q_original_sampled >= 0:
+                return a_sampled # This is an environment action for a forward step
+            else:
+                # Negative draw: Trigger a jump.
+                # The jump target selection logic can be the same as before.
+                if trajectory_history and len(trajectory_history) >= self.min_trajectory_for_jump:
+                    candidate_jumps = []
+                    for i in range(len(trajectory_history) -1): 
+                        past_s, past_a, _ = trajectory_history[i]
+                        q_val_past_sa = self.q_table[past_s][past_a]
+                        if q_val_past_sa < 0:
+                            score = abs(q_val_past_sa - (-self.backward_epsilon))
+                            candidate_jumps.append({'state_to_jump_to': past_s, 'score': score})
+                    
+                    if candidate_jumps:
+                        candidate_jumps.sort(key=lambda x: x['score'])
+                        best_jump_target_state = candidate_jumps[0]['state_to_jump_to']
+                        return ("JUMP", best_jump_target_state)
+                
+                # If jump cannot be made (e.g., no suitable past states or short trajectory),
+                # or if q_original_sampled was negative but no jump candidates found,
+                # then fall back to taking the sampled action `a_sampled` forward.
+                # This means even if q(s,a) is negative, we might still take it as a forward step.
+                # This part needs careful thought: if a "negative draw" *must* be a jump,
+                # and no jump is possible, what happens? Explore?
+                # For now, if jump fails, proceed with a_sampled.
+                return a_sampled
 
     def learn(self, s, a, r, s2, done_s2, trajectory):
         """
