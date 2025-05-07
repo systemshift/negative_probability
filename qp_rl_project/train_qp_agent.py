@@ -44,7 +44,10 @@ def main():
         "exploration_decay": 0.999, # Slower decay for more episodes
         "min_exploration_rate": 0.01,
         "q_init_val": 0.0,
-        "backward_epsilon": 0.01    # eps for backward update
+        "backward_epsilon": 0.01,   # eps for backward update
+        "softmax_temp": 0.5,        # Temperature for softmax action selection
+        "p_backward_jump": 0.1,     # Probability of attempting a backward jump
+        "min_trajectory_for_jump": 3 # Min trajectory length to consider a jump (e.g. S0->S1->S2, now at S2, can jump to S0)
     }
     agent = QPAgent(env, **agent_config)
 
@@ -59,17 +62,71 @@ def main():
         current_episode_trajectory = []
         state = env.reset()
         episode_reward = 0
+        num_jumps_this_episode = 0
         
-        for step in range(max_steps_per_episode):
-            action = agent.choose_action(state, current_episode_trajectory) # Pass trajectory (though not used by basic choose_action yet)
+        for step_num in range(max_steps_per_episode): # Renamed step to step_num to avoid conflict
+            action_or_jump_info = agent.choose_action(state, current_episode_trajectory)
             
-            next_state, reward, done, _ = env.step(action)
+            if isinstance(action_or_jump_info, tuple) and action_or_jump_info[0] == "JUMP":
+                _, jumped_to_state = action_or_jump_info
+                # print(f"Episode {episode+1}, Step {step_num+1}: Jumped from {state} to {jumped_to_state}")
+                state = jumped_to_state
+                num_jumps_this_episode += 1
+                
+                # Truncate trajectory: find the first occurrence of jumped_to_state and keep history up to that point.
+                # This means we are rewinding to the point *after* jumped_to_state was first experienced via an action.
+                # The state in trajectory is s, so we look for trajectory entries where s == jumped_to_state
+                # More accurately, we should find the index of the (s,a,r) tuple where s was jumped_to_state
+                # and the agent is now about to choose an action from jumped_to_state.
+                # So, the trajectory should reflect the path taken to reach jumped_to_state.
+                
+                # Find the index of the first time 'jumped_to_state' was the *resulting state* s2 of a transition (s,a,r) -> s2
+                # This is complex. A simpler trajectory management for now:
+                # Find the last index where jumped_to_state was the 's' component.
+                # This means we are rewinding to the point where an action was taken *from* jumped_to_state.
+                
+                # Simpler: Truncate trajectory to the point where jumped_to_state was the *start* of a recorded (s,a,r)
+                # This means we are rewinding as if we just arrived at jumped_to_state and are about to act from it.
+                # The history *leading to* jumped_to_state should be preserved.
+                
+                # Let's find the first index i where trajectory_history[i][0] == jumped_to_state
+                # This means we are rewinding to the first time we were *in* jumped_to_state and about to take an action.
+                # The trajectory should then be sliced up to, but not including, that point,
+                # as we are now *at* jumped_to_state, and the history is what led *before* it.
+                # This is still tricky.
+                
+                # Simplest for now: Truncate to the entry *before* the first time jumped_to_state was visited as 's'.
+                # Or, if jumped_to_state was s in trajectory[k] = (s,a,r), then new trajectory is trajectory[:k]
+                # This means the history is up to the point *before* we first acted from jumped_to_state.
+                
+                # Let's try this: find the first entry (s_hist, a_hist, r_hist) where s_hist == jumped_to_state.
+                # The new trajectory will be all entries *before* this one.
+                # This means we are truly rewinding to a point *before* we first acted from jumped_to_state.
+                
+                # If trajectory_history = [(s0,a0,r0), (s1,a1,r1), (s2,a2,r2)] and we jump to s1.
+                # New trajectory should be [(s0,a0,r0)]. State is s1.
+                
+                found_idx = -1
+                for idx, (s_hist, _, _) in enumerate(current_episode_trajectory):
+                    if s_hist == jumped_to_state:
+                        found_idx = idx
+                        break
+                if found_idx != -1:
+                    current_episode_trajectory = current_episode_trajectory[:found_idx]
+                # If jumped_to_state was the very first state (e.g. env.reset()), trajectory becomes empty.
+                
+                # No env.step(), no reward from env, no learning call for the jump itself.
+                # done status doesn't change by jump itself.
+                if done: # If already done and we jump, break (should not happen if goal is terminal)
+                    break 
+                continue # Continue to next step in the episode from the new state
+
+            # Standard forward action
+            action = action_or_jump_info
+            next_state, reward, done, _ = env.step(action) # 'done' here is for next_state
             
-            # Store transition info for learning
-            # The agent.learn method expects (s,a,r) of current transition to be in trajectory
             current_episode_trajectory.append((state, action, reward))
-            
-            agent.learn(state, action, reward, next_state, current_episode_trajectory)
+            agent.learn(state, action, reward, next_state, done, current_episode_trajectory) # Pass 'done' as done_s2
             
             episode_reward += reward
             state = next_state
@@ -81,7 +138,7 @@ def main():
         all_episode_rewards.append(episode_reward)
         
         if (episode + 1) % 100 == 0:
-            print(f"Episode {episode + 1}/{num_episodes} finished. Reward: {episode_reward:.2f}, Exploration Rate: {agent.exploration_rate:.3f}")
+            print(f"Episode {episode + 1}/{num_episodes} finished. Reward: {episode_reward:.2f}, Jumps: {num_jumps_this_episode}, Exp Rate: {agent.exploration_rate:.3f}")
             # Optional: Render the last state of an episode
             # print("Final state of episode:")
             # env.render()

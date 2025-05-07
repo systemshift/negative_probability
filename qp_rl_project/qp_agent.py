@@ -6,7 +6,8 @@ class QPAgent:
     def __init__(self, env, alpha=0.1, gamma=0.9, 
                  exploration_rate=1.0, exploration_decay=0.995, 
                  min_exploration_rate=0.01, q_init_val=0.0, 
-                 backward_epsilon=0.01):
+                 backward_epsilon=0.01, softmax_temp=1.0,
+                 p_backward_jump=0.1, min_trajectory_for_jump=2):
         """
         Quasi-Probability Reinforcement Learning Agent.
 
@@ -20,6 +21,10 @@ class QPAgent:
             q_init_val (float): Initial value for Q-table entries.
             backward_epsilon (float): The 'eps' in the backward update rule.
                                      abs(q[sp][ap]) will tend towards this value for past states.
+            softmax_temp (float): Temperature parameter for softmax action selection.
+                                  Higher temp = more randomness, Lower temp = more greedy.
+            p_backward_jump (float): Probability of attempting a backward jump during exploitation.
+            min_trajectory_for_jump (int): Minimum length of trajectory_history to consider a jump.
         """
         self.env = env
         self.alpha = alpha
@@ -29,6 +34,9 @@ class QPAgent:
         self.min_exploration_rate = min_exploration_rate
         self.q_init_val = q_init_val
         self.backward_epsilon = backward_epsilon
+        self.softmax_temp = softmax_temp
+        self.p_backward_jump = p_backward_jump
+        self.min_trajectory_for_jump = min_trajectory_for_jump
 
         # Q-table: stores q(s,a) which are real numbers.
         # Positive values might indicate "good future action".
@@ -56,29 +64,66 @@ class QPAgent:
             int: The action to take.
         """
         if random.random() < self.exploration_rate:
-            # Explore: choose a random action
+            # Explore: choose a random environment action
             return random.randrange(self.action_space_size)
         else:
-            # Exploit: choose the best action from Q-table
-            state_q_values = self.q_table[state]
-            if not state_q_values: # If no q-values for this state yet
-                return random.randrange(self.action_space_size)
-            
-            # Find the action(s) with the maximum Q-value
-            max_q = -float('inf')
-            best_actions = []
-            for action, q_value in state_q_values.items():
-                if q_value > max_q:
-                    max_q = q_value
-                    best_actions = [action]
-                elif q_value == max_q:
-                    best_actions.append(action)
-            
-            if not best_actions: # Should not happen if state_q_values is not empty
-                 return random.randrange(self.action_space_size)
-            return random.choice(best_actions) # Break ties randomly
+            # Exploit:
+            # With p_backward_jump, attempt a backward jump
+            if trajectory_history and \
+               len(trajectory_history) >= self.min_trajectory_for_jump and \
+               random.random() < self.p_backward_jump:
+                
+                candidate_jumps = [] # List of (past_state, q_value_of_past_s_a)
+                # Iterate up to the second to last entry, as the last entry is the current state's precursor
+                for i in range(len(trajectory_history) -1): 
+                    past_s, past_a, _ = trajectory_history[i]
+                    q_val_past_sa = self.q_table[past_s][past_a]
+                    
+                    # We are looking for past state-actions that are "plausible pasts".
+                    # The backward update drives q[sp][ap] towards -self.backward_epsilon.
+                    if q_val_past_sa < 0: # Consider only negative Q-values for past plausibility
+                        # Store the state `past_s` to jump to, and its "score"
+                        # Score: how close q_val_past_sa is to -self.backward_epsilon
+                        # Lower score (closer to 0 difference) is better.
+                        score = abs(q_val_past_sa - (-self.backward_epsilon))
+                        candidate_jumps.append({'state_to_jump_to': past_s, 'score': score, 'original_q': q_val_past_sa})
+                
+                if candidate_jumps:
+                    # Select the jump candidate with the best (lowest) score
+                    candidate_jumps.sort(key=lambda x: x['score'])
+                    best_jump_target_state = candidate_jumps[0]['state_to_jump_to']
+                    # print(f"DEBUG: Attempting jump to {best_jump_target_state} from history (score: {candidate_jumps[0]['score']:.3f}, q:{candidate_jumps[0]['original_q']:.3f})")
+                    return ("JUMP", best_jump_target_state)
 
-    def learn(self, s, a, r, s2, trajectory):
+            # If not jumping, or jump attempt failed, proceed with forward action selection (softmax)
+            state_q_values_dict = self.q_table[state]
+            if not state_q_values_dict: 
+                return random.randrange(self.action_space_size)
+
+            actions = list(state_q_values_dict.keys())
+            # Consider only non-negative Q-values for forward softmax, or all if none are non-negative?
+            # For now, use all Q-values for softmax as per "shift-softmax over positive+negative" idea.
+            # The "shift" is not yet implemented, so it's direct softmax.
+            q_values = np.array([state_q_values_dict[a] for a in actions])
+
+            if self.softmax_temp <= 0: # Avoid division by zero; behave greedily
+                max_q = np.max(q_values)
+                # Ensure actions is not empty before choice
+                best_actions = [actions[i] for i, q_val in enumerate(q_values) if q_val == max_q]
+                return random.choice(best_actions) if best_actions else random.randrange(self.action_space_size)
+
+
+            q_values_stable = q_values - np.max(q_values) 
+            exp_q_values = np.exp(q_values_stable / self.softmax_temp)
+            probs = exp_q_values / np.sum(exp_q_values)
+            
+            if np.isclose(np.sum(probs), 0.0) or not np.all(np.isfinite(probs)) or len(actions)==0:
+                return random.randrange(self.action_space_size)
+
+            chosen_action = random.choices(actions, weights=probs, k=1)[0]
+            return chosen_action
+
+    def learn(self, s, a, r, s2, done_s2, trajectory):
         """
         Updates the Q-table based on the transition and trajectory.
         Implements both forward (future) and backward (past) updates.
@@ -88,24 +133,27 @@ class QPAgent:
             a: Action taken.
             r: Reward received.
             s2: Next state.
+            done_s2 (bool): True if s2 is a terminal state, False otherwise.
             trajectory (list): History of (state, action, reward) tuples for the current episode.
                                Assumes `(s, a, r)` of the current transition has ALREADY been added.
         """
-        # Forward Update (Future) - based on readme: q[s][a] += alpha * (r - q[s][a])
-        # This is simpler than a full Q-learning update involving max_q(s2,a').
-        # It treats r as the target, somewhat like a contextual bandit.
+        # Forward Update (Future) - Standard Q-learning update
         current_q_sa = self.q_table[s][a]
-        self.q_table[s][a] = current_q_sa + self.alpha * (r - current_q_sa)
+        
+        max_next_q = 0.0
+        if not done_s2: # Only consider future rewards if s2 is not terminal
+            if self.q_table[s2]: # If s2 has been visited and has Q-values
+                max_next_q = max(self.q_table[s2].values())
+            # If s2 is new (not in q_table), max_next_q remains 0.0 (optimistic init or q_init_val if used)
+        
+        target_q_sa = r + self.gamma * max_next_q
+        self.q_table[s][a] = current_q_sa + self.alpha * (target_q_sa - current_q_sa)
 
-        # Backward Update (Past) - q[sp][ap] -= alpha * (abs(q[sp][ap]) - eps)
-        # This update applies to the state-action pair (sp, ap) that led to state s.
-        if len(trajectory) > 1: # Need at least two entries to get (sp, ap)
-            # trajectory[-1] is (s, a, r)
-            # trajectory[-2] is (sp, ap, rp)
+        # Backward Update (Past)
+        if len(trajectory) > 1: 
             sp, ap, _ = trajectory[-2] 
-            
             q_val_past = self.q_table[sp][ap]
-            self.q_table[sp][ap] = q_val_past - self.alpha * (abs(q_val_past) - self.backward_epsilon)
+            self.q_table[sp][ap] = q_val_past - self.alpha * (q_val_past + self.backward_epsilon)
 
     def decay_exploration_rate(self):
         """
