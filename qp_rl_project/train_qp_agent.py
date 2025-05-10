@@ -1,8 +1,8 @@
 import matplotlib.pyplot as plt
 import numpy as np
 
-from timeline_grid_env import TimelineGridEnv # Assuming it's in the same directory or PYTHONPATH
-from qp_agent import QPAgent
+from qp_rl_project.timeline_grid_env import TimelineGridEnv
+from qp_rl_project.qp_agent import QPAgent
 
 def plot_rewards(episode_rewards, filename="qp_rl_episode_rewards.png"):
     plt.figure(figsize=(10, 6))
