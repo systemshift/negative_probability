@@ -1,7 +1,9 @@
 import collections
 
 class TimelineGridEnv:
-    def __init__(self, grid_size=(5,5), start_pos=(0,0), goal_pos=None, walls=None, one_way_doors=None, portals=None):
+    def __init__(self, grid_size=(5,5), start_pos=(0,0), goal_pos=None, walls=None,
+                 one_way_doors=None, portals=None, custom_rewards=None, step_penalty=-0.1,
+                 dynamic_obstacles=None, keys=None, doors=None):
         self.grid_size = grid_size
         self.rows, self.cols = grid_size
         
@@ -66,14 +68,107 @@ class TimelineGridEnv:
                 raise ValueError(f"Portal entry {entry_pos} cannot be at the goal position.")
             # It's okay for a portal exit to be the goal.
 
+        self.custom_rewards = custom_rewards if custom_rewards is not None else []
+        # Example custom_rewards: [{'position': (r,c), 'reward': float_value}]
+        # Basic validation for custom_rewards
+        for cr in self.custom_rewards:
+            if not all(k in cr for k in ['position', 'reward']):
+                raise ValueError(f"Custom reward {cr} is missing 'position' or 'reward' key.")
+            pos = cr['position']
+            if not (0 <= pos[0] < self.rows and 0 <= pos[1] < self.cols):
+                raise ValueError(f"Position {pos} in custom reward {cr} is outside grid boundaries.")
+            if not isinstance(cr['reward'], (int, float)):
+                raise ValueError(f"Reward value in {cr} must be a number.")
+            if pos == self.start_pos:
+                raise ValueError(f"Custom reward {cr} cannot be at the start position.")
+            # It's okay for a custom reward to be at the goal, it might modify the goal reward.
+            # It's okay for a custom reward to be on a wall, though agent might not reach it.
+
+        self.step_penalty = step_penalty
+        if not isinstance(self.step_penalty, (int, float)):
+            raise ValueError(f"Step penalty {self.step_penalty} must be a number.")
+
+        self.dynamic_obstacles = dynamic_obstacles if dynamic_obstacles is not None else []
+        # Example dynamic_obstacles: [{'path': [(r1,c1), (r2,c2), ...], 'period': T}]
+        # 'path' defines the sequence of positions the obstacle cycles through.
+        # 'period' is how many time steps it stays at each position in its path.
+        # Current position of each dynamic obstacle will be stored internally.
+        self._current_dynamic_obstacle_positions = []
+        for i, do in enumerate(self.dynamic_obstacles):
+            if not all(k in do for k in ['path', 'period']):
+                raise ValueError(f"Dynamic obstacle {do} is missing 'path' or 'period' key.")
+            if not do['path']:
+                raise ValueError(f"Dynamic obstacle {do} has an empty path.")
+            for pos in do['path']:
+                if not (0 <= pos[0] < self.rows and 0 <= pos[1] < self.cols):
+                    raise ValueError(f"Position {pos} in dynamic obstacle path {do['path']} is outside grid.")
+                if pos in self.walls:
+                     raise ValueError(f"Dynamic obstacle path {do['path']} cannot include a wall position {pos}.")
+            if not isinstance(do['period'], int) or do['period'] <= 0:
+                raise ValueError(f"Dynamic obstacle period {do['period']} must be a positive integer.")
+            # Initialize internal state for dynamic obstacles
+            self._current_dynamic_obstacle_positions.append(do['path'][0])
+
+        self.keys = keys if keys is not None else [] # List of {'id': key_id, 'position': (r,c)}
+        self._active_keys = [] # Internal state for keys present in the env
+        for key_spec in self.keys:
+            if not all(k in key_spec for k in ['id', 'position']):
+                raise ValueError(f"Key {key_spec} is missing 'id' or 'position'.")
+            pos = key_spec['position']
+            if not (0 <= pos[0] < self.rows and 0 <= pos[1] < self.cols):
+                raise ValueError(f"Key position {pos} is outside grid.")
+            if pos in self.walls or pos == self.start_pos or pos == self.goal_pos:
+                raise ValueError(f"Key {key_spec} cannot be on a wall, start, or goal.")
+
+        self.doors = doors if doors is not None else []
+        # List of {'position': (r,c), 'key_id_required': key_id, 'locked': True/False}
+        self._door_states = [] # Internal state for door locked status
+        for door_spec in self.doors:
+            if not all(k in door_spec for k in ['position', 'key_id_required', 'locked']):
+                raise ValueError(f"Door {door_spec} is missing 'position', 'key_id_required', or 'locked'.")
+            pos = door_spec['position']
+            if not (0 <= pos[0] < self.rows and 0 <= pos[1] < self.cols):
+                raise ValueError(f"Door position {pos} is outside grid.")
+            if pos in self.walls or pos == self.start_pos or pos == self.goal_pos:
+                 raise ValueError(f"Door {door_spec} cannot be on a wall, start, or goal.")
+            if not isinstance(door_spec['locked'], bool):
+                raise ValueError(f"Door 'locked' status for {door_spec} must be boolean.")
+        
         self.agent_pos = None # Will be set in reset()
+        self.time_step = 0
+        self.inventory = set() # Agent's key inventory
+
+    def _update_dynamic_obstacles(self):
+        """Updates the positions of dynamic obstacles based on the current time_step."""
+        self._current_dynamic_obstacle_positions = []
+        for do_spec in self.dynamic_obstacles:
+            path = do_spec['path']
+            period = do_spec['period']
+            # Calculate current index in the path
+            # Each position in path is held for 'period' time steps.
+            # Total cycle length for one round through path is len(path) * period.
+            # Current "phase" in the cycle: self.time_step % (len(path) * period)
+            # Index in path: (self.time_step // period) % len(path)
+            current_path_idx = (self.time_step // period) % len(path)
+            self._current_dynamic_obstacle_positions.append(path[current_path_idx])
 
     def reset(self):
         """
-        Resets the agent to the starting position.
+        Resets the agent to the starting position and time step to 0.
+        Resets keys and doors to their initial states.
         Returns the initial observation (agent's position).
         """
         self.agent_pos = self.start_pos
+        self.time_step = 0
+        self._update_dynamic_obstacles() 
+        
+        # Reset keys: copy from initial spec to active_keys
+        self._active_keys = [dict(k) for k in self.keys] # Make a deep copy for mutable state
+        
+        # Reset doors: copy from initial spec to _door_states
+        self._door_states = [dict(d) for d in self.doors] # Make a deep copy
+
+        self.inventory = set() # Clear agent inventory
         return self.agent_pos
 
     def step(self, action_idx):
@@ -101,43 +196,90 @@ class TimelineGridEnv:
             if self.agent_pos == door['from'] and action_idx == door['action']:
                 next_row, next_col = door['to']
                 one_way_door_taken = True
-                # print(f"DEBUG: Took one-way door from {door['from']} to {door['to']} with action {action_idx}")
                 break
         
         if not one_way_door_taken:
-            # Standard move if no one-way door was applicable for this action from this state
             next_row = current_row + dr
             next_col = current_col + dc
 
-            # Check for wall collision for standard moves
+            # Boundary checks
+            next_row = max(0, min(next_row, self.rows - 1))
+            next_col = max(0, min(next_col, self.cols - 1))
+            
+            # Check for wall collision
             if (next_row, next_col) in self.walls:
-                next_row, next_col = current_row, current_col # Stay in place
-                reward = -1.0 # Penalty for hitting a wall
-                done = False
-                self.agent_pos = (next_row, next_col)
-                return self.agent_pos, reward, done, {}
-
-            # Boundary checks for standard moves
-            if next_row < 0 or next_row >= self.rows:
-                next_row = current_row # Stay in place
-            if next_col < 0 or next_col >= self.cols:
-                next_col = current_col # Stay in place
+                next_row, next_col = current_row, current_col 
         
-        self.agent_pos = (next_row, next_col)
+        # Tentative new position
+        potential_agent_pos = (next_row, next_col)
 
-        # Check for portal transition after movement
+        # Check for door interaction
+        door_collided = False
+        for i, door_state in enumerate(self._door_states):
+            if door_state['position'] == potential_agent_pos and door_state['locked']:
+                if door_state['key_id_required'] in self.inventory:
+                    self._door_states[i]['locked'] = False # Unlock the door
+                    # Agent passes through, potential_agent_pos is fine
+                    # print(f"DEBUG: Unlocked and passed door at {potential_agent_pos} with key {door_state['key_id_required']}")
+                else:
+                    # Agent hits a locked door without the key
+                    potential_agent_pos = (current_row, current_col) # Stay in place
+                    door_collided = True
+                    # print(f"DEBUG: Hit locked door at {door_state['position']}. Required key: {door_state['key_id_required']}, Inventory: {self.inventory}")
+                break 
+        
+        self.time_step += 1 # Increment time first
+        self._update_dynamic_obstacles() # Update DOs based on new time
+
+        # Check for dynamic obstacle collision
+        if potential_agent_pos in self._current_dynamic_obstacle_positions:
+            self.agent_pos = (current_row, current_col) # Stay in place before DO
+            reward = -2.0 
+            done = False
+            return self.agent_pos, reward, done, {"collision_type": "dynamic_obstacle"}
+        
+        # If collided with a locked door (and not overridden by DO collision)
+        if door_collided: # This check is after DO check, agent stays at current_row, current_col
+            self.agent_pos = (current_row, current_col)
+            reward = -1.5 # Penalty for hitting a locked door
+            done = False
+            return self.agent_pos, reward, done, {"collision_type": "locked_door"}
+
+        # No collision with DO or locked door, update agent position
+        self.agent_pos = potential_agent_pos
+        
+        # Check for key pickup
+        key_to_remove_idx = -1
+        for i, key_spec in enumerate(self._active_keys):
+            if self.agent_pos == key_spec['position']:
+                self.inventory.add(key_spec['id'])
+                key_to_remove_idx = i
+                # print(f"DEBUG: Picked up key {key_spec['id']} at {self.agent_pos}. Inventory: {self.inventory}")
+                break 
+        if key_to_remove_idx != -1:
+            del self._active_keys[key_to_remove_idx] # Key is picked up
+
+        # Check for portal transition
         if self.agent_pos in self.portals:
-            # print(f"DEBUG: Agent at {self.agent_pos}, which is a portal entry.")
             self.agent_pos = self.portals[self.agent_pos]
-            # print(f"DEBUG: Agent teleported to {self.agent_pos}.")
-            # Reward for taking a portal can be neutral or specific. Keeping it part of the step cost for now.
 
         # Reward logic
-        reward = -0.1 # Small penalty for each step
         done = False
+        reward = self.step_penalty 
+
+        for cr in self.custom_rewards:
+            if self.agent_pos == cr['position']:
+                reward = cr['reward']
+                break 
 
         if self.agent_pos == self.goal_pos:
-            reward = 1.0 # Reward for reaching the goal
+            is_goal_custom_rewarded = False
+            for cr in self.custom_rewards:
+                if self.agent_pos == cr['position'] and self.agent_pos == self.goal_pos:
+                    is_goal_custom_rewarded = True
+                    break
+            if not is_goal_custom_rewarded:
+                 reward = 1.0 
             done = True
         
         return self.agent_pos, reward, done, {}
@@ -152,29 +294,45 @@ class TimelineGridEnv:
                 row_str = ""
                 for c in range(self.cols):
                     pos = (r,c)
+                    char_to_print = ". " # Default empty space
+
                     if pos == self.agent_pos:
-                        row_str += "A "
+                        char_to_print = "A "
                     elif pos == self.goal_pos:
-                        row_str += "G "
+                        char_to_print = "G "
                     elif pos in self.walls:
-                        row_str += "# "
-                    elif pos in self.portals: # Mark portal entry
-                        row_str += "P "
-                    elif pos in self.portals.values() and pos not in self.portals: # Mark portal exit if not also an entry
-                         # This check is a bit tricky if an exit can be an entry to another portal
-                         # For simplicity, just marking entries for now.
-                         # A more robust way would be to have a list of all portal cells.
+                        char_to_print = "# "
+                    elif pos in self._current_dynamic_obstacle_positions:
+                        char_to_print = "D "
+                    elif any(k['position'] == pos for k in self._active_keys):
+                        # Find the key_id to display, perhaps first char or number
+                        key_id_str = "K"
+                        for k_spec in self._active_keys:
+                            if k_spec['position'] == pos:
+                                key_id_str = str(k_spec['id'])[0] + " " # Display first char of key ID
+                                break
+                        char_to_print = key_id_str
+                    elif any(d['position'] == pos for d in self._door_states):
+                        is_locked = False
+                        for d_state in self._door_states:
+                            if d_state['position'] == pos:
+                                is_locked = d_state['locked']
+                                break
+                        char_to_print = "L " if is_locked else "U " # Locked/Unlocked Door
+                    elif any(cr['position'] == pos for cr in self.custom_rewards):
+                        char_to_print = "$ " 
+                    elif pos in self.portals: 
+                        char_to_print = "P "
+                    elif pos in self.portals.values() and pos not in self.portals: 
                         is_also_an_entry = any(val_pos == pos for val_pos in self.portals.keys())
-                        if not is_also_an_entry: # only mark as 'O' if it's purely an exit
-                            row_str += "O " # 'O' for Out/Exit of a portal
-                        else: # If an exit is also an entry for another portal, it will be marked 'P'
-                            row_str += ". " 
-                    else:
-                        row_str += ". "
+                        if not is_also_an_entry: 
+                            char_to_print = "O " 
+                    
+                    row_str += char_to_print
                 print(row_str)
-            print("-" * (self.cols * 2)) # Separator
+            print(f"Time: {self.time_step} Inv: {sorted(list(self.inventory))}") # Display time and inventory
+            print("-" * (self.cols * 2)) 
         else:
-            # Potentially return a more structured representation for other modes
             pass
 
 if __name__ == '__main__':
@@ -250,12 +408,230 @@ if __name__ == '__main__':
     # except ValueError as e:
     #     print(f"Caught expected error for wall on goal: {e}")
 
+    print("\n--- Testing TimelineGridEnv with Custom Rewards and Step Penalty (Phase CR) ---")
+    custom_reward_list_cr = [
+        {'position': (0,2), 'reward': 5.0}, # A highly rewarding spot
+        {'position': (1,0), 'reward': -2.0} # A penalty spot
+    ]
+    env_cr = TimelineGridEnv(grid_size=(3,3), start_pos=(0,0), goal_pos=(2,2),
+                             custom_rewards=custom_reward_list_cr, step_penalty=-0.5)
+    obs_cr = env_cr.reset()
+    env_cr.render()
+    total_reward_cr = 0
+    
+    actions_to_take_cr = [
+        3, # R: (0,0) -> (0,1), reward -0.5
+        3, # R: (0,1) -> (0,2) (custom reward 5.0)
+        1, # D: (0,2) -> (1,2), reward -0.5
+        2, # L: (1,2) -> (1,1), reward -0.5
+        2, # L: (1,1) -> (1,0) (custom reward -2.0)
+        1, # D: (1,0) -> (2,0), reward -0.5
+        3, # R: (2,0) -> (2,1), reward -0.5
+        3, # R: (2,1) -> (2,2) (Goal, reward 1.0)
+    ]
+    print("Path to test custom rewards:")
+    for i, action in enumerate(actions_to_take_cr):
+        print(f"Step {i+1}: Current obs: {obs_cr}, Taking action {action}")
+        obs_cr, reward, done, _ = env_cr.step(action)
+        total_reward_cr += reward
+        env_cr.render()
+        print(f"New Obs: {obs_cr}, Reward: {reward:.1f}, Done: {done}")
+        if done:
+            print("Goal reached with custom rewards!")
+            break
+    print(f"Total reward (custom rewards path): {total_reward_cr:.1f}")
+
+    # Test invalid custom_rewards configs
+    try:
+        TimelineGridEnv(grid_size=(3,3), custom_rewards=[{'pos':(0,0), 'reward':1}]) # Wrong key
+    except ValueError as e:
+        print(f"\nCaught expected error for invalid custom reward key: {e}")
+    try:
+        TimelineGridEnv(grid_size=(3,3), custom_rewards=[{'position':(10,10), 'reward':1}])
+    except ValueError as e:
+        print(f"Caught expected error for custom reward out of bounds: {e}")
+    try:
+        TimelineGridEnv(grid_size=(3,3), step_penalty="high")
+    except ValueError as e:
+        print(f"Caught expected error for invalid step penalty type: {e}")
+
+    print("\n--- Testing TimelineGridEnv with Dynamic Obstacles (Phase DO) ---")
+    dynamic_obstacle_list_do = [
+        {'path': [(1,1), (1,2), (1,3), (1,2)], 'period': 1}, # Moves R, R, L, L period 1
+        {'path': [(3,2), (2,2), (1,2)], 'period': 2}       # Moves U, U, D period 2
+    ]
+    env_do = TimelineGridEnv(grid_size=(5,5), start_pos=(0,0), goal_pos=(4,4),
+                             walls=[(0,1)], dynamic_obstacles=dynamic_obstacle_list_do)
+    obs_do = env_do.reset()
+    env_do.render()
+    total_reward_do = 0
+    
+    # Actions to test dynamic obstacles:
+    # Agent tries to move into a space that will be occupied by a dynamic obstacle
+    # Agent waits for a dynamic obstacle to pass
+    actions_to_take_do = [
+        1, # D (0,0)->(1,0). Time 1. DO1 at (1,2), DO2 at (2,2)
+        3, # R (1,0)->(1,1). Time 2. DO1 at (1,3), DO2 at (2,2). Agent hits DO1 if it moves to (1,2)
+           # Let's try to hit it: action 3 (Right)
+        3, # R (1,1)->(1,1) (collision with DO1 at (1,2)). Time 3. DO1 at (1,3), DO2 at (1,2). Reward -2.0
+        0, # U (1,1)->(0,1) (hits wall). Time 4. DO1 at (1,2), DO2 at (1,2). Reward -1.0
+        1, # D (0,1)->(0,1) (wall). Time 5. DO1 at (1,2), DO2 at (3,2).
+        3, # R (0,1)->(0,1) (wall). Time 6. DO1 at (1,1), DO2 at (3,2).
+        # Let agent move to (1,0)
+        1, # D (0,0) from reset. obs_do=(0,0)
+        # Reset and try a path that waits
+    ]
+    env_do.reset() # Reset for a clean test sequence
+    obs_do = env_do.agent_pos
+    print("Path to test dynamic obstacles (collision and waiting):")
+    # Sequence 1: Collision
+    print("Sequence 1: Agent attempts to move into DO path")
+    # Time 0: Agent (0,0), DO1 (1,1), DO2 (3,2)
+    # Action: Down (to (1,0))
+    # Time 1: Agent (1,0), DO1 (1,2) (path[1]), DO2 (3,2) (path[0], period 2, time 1//2=0)
+    # Action: Right (to (1,1))
+    # Time 2: Agent (1,1), DO1 (1,3) (path[2]), DO2 (2,2) (path[1], period 2, time 2//2=1)
+    # Action: Right (to (1,2)). DO1 will be at (1,2) at Time 3.
+    # Time 3: Agent should collide. DO1 (1,2) (path[0]), DO2 (2,2) (path[1], period 2, time 3//2=1)
+    
+    test_actions_collision = [1, 3, 3] 
+    for i, action in enumerate(test_actions_collision):
+        print(f"Step {i+1}: Current obs: {obs_do}, Time: {env_do.time_step}, Taking action {action}")
+        print(f"  DOs before step: {env_do._current_dynamic_obstacle_positions}")
+        obs_do, reward, done, info = env_do.step(action)
+        total_reward_do += reward
+        env_do.render()
+        print(f"  New Obs: {obs_do}, Reward: {reward:.1f}, Done: {done}, Info: {info}")
+        if done: break
+    print(f"Total reward after collision test: {total_reward_do:.1f}")
+
+    # Sequence 2: Waiting
+    print("\nSequence 2: Agent waits for DO to pass")
+    env_do.reset()
+    obs_do = env_do.agent_pos
+    total_reward_do = 0
+    # Time 0: Agent (0,0), DO1 (1,1), DO2 (3,2)
+    # Action: Down (to (1,0))
+    # Time 1: Agent (1,0), DO1 (1,2), DO2 (3,2)
+    # Action: Stay (e.g. try to move into self - needs a 'wait' action or smart move)
+    # For now, let's assume agent tries to move Right (to (1,1)) but DO1 is at (1,1) at T=0, T=6 etc.
+    # Let's make DO1 path: [(1,1), (2,1)] period 1. So it's at (1,1) at T=0,2,4... and (2,1) at T=1,3,5...
+    env_do.dynamic_obstacles = [{'path': [(1,1), (2,1)], 'period': 1}]
+    env_do.reset()
+    obs_do = env_do.agent_pos # (0,0)
+    env_do.render()
+    # Time 0: A(0,0), DO(1,1)
+    # Action: D to (1,0)
+    # Time 1: A(1,0), DO(2,1). Reward -0.1
+    print(f"Step 1: Current obs: {obs_do}, Time: {env_do.time_step}, Taking action 1 (Down)")
+    obs_do, reward, _, info = env_do.step(1) # Down
+    total_reward_do += reward
+    env_do.render()
+    print(f"  New Obs: {obs_do}, Reward: {reward:.1f}, Info: {info}")
+    # Time 1: A(1,0), DO(2,1)
+    # Action: R to (1,1). (1,1) is clear.
+    # Time 2: A(1,1), DO(1,1). Reward -0.1
+    print(f"Step 2: Current obs: {obs_do}, Time: {env_do.time_step}, Taking action 3 (Right)")
+    obs_do, reward, _, info = env_do.step(3) # Right
+    total_reward_do += reward
+    env_do.render()
+    print(f"  New Obs: {obs_do}, Reward: {reward:.1f}, Info: {info}")
+    # Time 2: A(1,1), DO(1,1)
+    # Action: R to (1,2). DO will be at (2,1) at T=3. (1,2) is clear.
+    # Time 3: A(1,2), DO(2,1). Reward -0.1
+    print(f"Step 3: Current obs: {obs_do}, Time: {env_do.time_step}, Taking action 3 (Right)")
+    obs_do, reward, _, info = env_do.step(3) # Right
+    total_reward_do += reward
+    env_do.render()
+    print(f"  New Obs: {obs_do}, Reward: {reward:.1f}, Info: {info}")
+    print(f"Total reward after waiting test: {total_reward_do:.1f}")
+
+    # Test invalid dynamic_obstacles configs
+    try:
+        TimelineGridEnv(grid_size=(3,3), dynamic_obstacles=[{'path':[(0,0)], 'period':0}]) 
+    except ValueError as e:
+        print(f"\nCaught expected error for invalid DO period: {e}")
+    try:
+        TimelineGridEnv(grid_size=(3,3), dynamic_obstacles=[{'path':[(0,0),(10,10)], 'period':1}])
+    except ValueError as e:
+        print(f"Caught expected error for DO path out of bounds: {e}")
+
+    print("\n--- Testing TimelineGridEnv with Keys and Doors (Phase KD) ---")
+    keys_kd = [
+        {'id': 'red', 'position': (0,1)},
+        {'id': 'blue', 'position': (2,0)}
+    ]
+    doors_kd = [
+        {'position': (1,2), 'key_id_required': 'red', 'locked': True},
+        {'position': (2,2), 'key_id_required': 'blue', 'locked': True}
+    ]
+    env_kd = TimelineGridEnv(grid_size=(3,3), start_pos=(0,0), goal_pos=(2,2),
+                             walls=[(1,1)], keys=keys_kd, doors=doors_kd)
+    obs_kd = env_kd.reset()
+    env_kd.render()
+    total_reward_kd = 0
+
+    # Path: Get red key, open red door, get blue key, open blue door (goal)
+    # (0,0) -> R (0,1) [Pick Red Key] -> D (1,1) [Wall] -> R (0,1) -> D (1,1) [Wall]
+    # (0,0) -> R (0,1) [Pick Red Key 'red']
+    # (0,1) -> D (1,1) [Wall, stay (0,1)]
+    # (0,1) -> D to (1,1) is wall.
+    # (0,1) -> R to (0,2)
+    # (0,2) -> D to (1,2) [Open Red Door]
+    # (1,2) -> L to (1,1) [Wall, stay (1,2)]
+    # (1,2) -> D to (2,2) [Goal, but Blue Door is there]
+    # Need to get Blue key from (2,0)
+    # Path: (0,0) -> R (0,1)[Key R] -> D (to (1,1) but wall) -> (0,1)
+    #       (0,1) -> D (to (1,1) wall)
+    #       (0,1) -> L (to (0,0))
+    #       (0,0) -> D (to (1,0))
+    #       (1,0) -> D (to (2,0)) [Key B]
+    #       (2,0) -> R (to (2,1))
+    #       (2,1) -> R (to (2,2)) [Open Blue Door, Goal]
+    # This path does not use red door. Let's simplify.
+    # Goal (0,2). Red Door at (0,2). Red Key at (0,1). Start (0,0)
+    env_kd.goal_pos = (0,2)
+    env_kd.keys = [{'id': 'R', 'position': (0,1)}]
+    env_kd.doors = [{'position': (0,2), 'key_id_required': 'R', 'locked': True}]
+    env_kd.walls = [] # Clear walls for this simple test
+    obs_kd = env_kd.reset()
+    env_kd.render()
+
+    actions_to_take_kd = [
+        3, # R (0,0)->(0,1) [Pick Key R]
+        3, # R (0,1)->(0,2) [Open Door R, Goal]
+    ]
+    print("Path to test keys and doors:")
+    for i, action in enumerate(actions_to_take_kd):
+        print(f"Step {i+1}: Obs={obs_kd}, Time={env_kd.time_step}, Inv={env_kd.inventory}, Taking action {action}")
+        obs_kd, reward, done, info = env_kd.step(action)
+        total_reward_kd += reward
+        env_kd.render()
+        print(f"  New Obs: {obs_kd}, Reward: {reward:.1f}, Done: {done}, Info: {info}")
+        if done: break
+    print(f"Total reward (keys/doors path): {total_reward_kd:.1f}")
+
+    # Test hitting a locked door
+    env_kd.reset() # Resets inventory and door locks
+    obs_kd = env_kd.agent_pos
+    print("\nTest hitting locked door:")
+    print(f"Step 1: Obs={obs_kd}, Time={env_kd.time_step}, Inv={env_kd.inventory}, Taking action 3 (Right to key)")
+    obs_kd, reward, _, _ = env_kd.step(3) # Get key
+    env_kd.render()
+    # Now try to open door again, but reset inventory
+    env_kd.inventory = set() # Manually remove key for test
+    print(f"Step 2: Obs={obs_kd}, Time={env_kd.time_step}, Inv={env_kd.inventory} (Key Removed!), Taking action 3 (Right to door)")
+    obs_kd, reward, _, info = env_kd.step(3) # Try to open door
+    env_kd.render()
+    print(f"  New Obs: {obs_kd}, Reward: {reward:.1f}, Info: {info}") # Should be at (0,1), reward -1.5
+
+
     print("\n--- Testing TimelineGridEnv with One-Way Doors (Phase 3) ---")
     one_way_door_list_p3 = [
         {'from': (1,2), 'to': (2,2), 'action': 1} 
     ]
     env_owd = TimelineGridEnv(grid_size=(4,4), start_pos=(0,1), goal_pos=(2,3), 
-                              walls=[(1,1)], one_way_doors=one_way_door_list_p3)
+                              walls=[(1,1)], one_way_doors=one_way_door_list_p3, step_penalty=-0.1) # Added default step_penalty for consistency
     obs_owd = env_owd.reset()
     # env_owd.render() # Rendered during action loop
     total_reward_owd = 0

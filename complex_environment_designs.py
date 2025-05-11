@@ -41,7 +41,7 @@ def create_deceptive_reward_maze():
         (2, 2), (2, 3), (2, 4), (2, 5), (2, 6), (2, 7),
         (4, 2), (4, 3), (4, 4), (4, 5), (4, 6), (4, 7),
         (6, 2), (6, 3), (6, 4), (6, 5), (6, 6), (6, 7),
-        (3, 2), (5, 2), (7, 2),
+        # (3, 2), (5, 2), (7, 2), # These were conflicting with one_way_door 'to' positions
         (3, 7), (5, 7), (7, 7),
     ]
     
@@ -106,7 +106,45 @@ def create_dynamic_obstacle_environment():
     
     # This would demonstrate the power of bidirectional time for solving
     # problems with dynamic elements
-    pass
+    
+    grid_size = (7, 7)
+    start_pos = (0, 3)
+    goal_pos = (6, 3)
+    
+    walls = [
+        (1, 1), (1, 2), (1, 3), (1, 4), (1, 5),
+        (3, 1), (3, 2), (3, 4), (3, 5), # Opening at (3,3)
+        (5, 1), (5, 2), (5, 3), (5, 4), (5, 5),
+    ]
+    
+    # Dynamic obstacles patrol horizontally in the corridors
+    # DO1: Patrols row 2, between col 1 and 5. Period 1 per step. Path length 9 (1-5 and back to 1)
+    # (2,1)->(2,2)->(2,3)->(2,4)->(2,5)->(2,4)->(2,3)->(2,2)->(2,1)
+    do1_path = [(2,1), (2,2), (2,3), (2,4), (2,5), (2,4), (2,3), (2,2)] # Path length 8, not 9
+    
+    # DO2: Patrols row 4, between col 1 and 5. Period 1 per step.
+    # (4,1)->(4,2)->(4,3)->(4,4)->(4,5)->(4,4)->(4,3)->(4,2)->(4,1)
+    do2_path = [(4,1), (4,2), (4,3), (4,4), (4,5), (4,4), (4,3), (4,2)]
+
+    dynamic_obstacles_spec = [
+        {'path': do1_path, 'period': 1},
+        {'path': do2_path, 'period': 1}
+    ]
+    
+    # Custom reward to encourage reaching the middle safe spot
+    custom_rewards_spec = [
+        {'position': (3,3), 'reward': 0.5} 
+    ]
+
+    return TimelineGridEnv(
+        grid_size=grid_size,
+        start_pos=start_pos,
+        goal_pos=goal_pos,
+        walls=walls,
+        dynamic_obstacles=dynamic_obstacles_spec,
+        custom_rewards=custom_rewards_spec,
+        step_penalty=-0.1
+    )
 
 def create_sequential_key_environment():
     """
@@ -132,7 +170,45 @@ def create_sequential_key_environment():
     #    (without the ability to jump back in time)
     
     # This would showcase how negative probability allows correcting past mistakes
-    pass
+    
+    grid_size = (5, 5)
+    start_pos = (0, 0)
+    goal_pos = (4, 4) # Goal is behind multiple doors
+    
+    walls = [
+        (0, 1), (1, 1), (2, 1), # Wall separating key1 area
+        (1, 3), (2, 3), (3, 3), # Wall separating key2 area
+    ]
+    
+    keys_spec = [
+        {'id': 'K1', 'position': (1,0)}, # Key 1
+        {'id': 'K2', 'position': (3,4)}, # Key 2
+    ]
+    
+    doors_spec = [
+        # Door 1 requires K1, at (2,2) to proceed to an intermediate area
+        {'position': (2,2), 'key_id_required': 'K1', 'locked': True},
+        # Door 2 requires K2, at (4,2) to reach goal area
+        {'position': (4,2), 'key_id_required': 'K2', 'locked': True}
+    ]
+    
+    # Custom reward for picking up keys
+    custom_rewards_spec = [
+        {'position': (1,0), 'reward': 0.2}, # Reward for K1
+        {'position': (3,4), 'reward': 0.2}, # Reward for K2
+        {'position': (2,2), 'reward': 0.1}, # Small reward for opening D1
+    ]
+
+    return TimelineGridEnv(
+        grid_size=grid_size,
+        start_pos=start_pos,
+        goal_pos=goal_pos,
+        walls=walls,
+        keys=keys_spec,
+        doors=doors_spec,
+        custom_rewards=custom_rewards_spec,
+        step_penalty=-0.05 # Smaller step penalty
+    )
 
 def create_multi_timeline_environment():
     """
@@ -189,10 +265,10 @@ def create_non_markovian_environment():
 
 if __name__ == "__main__":
     # Test the deceptive reward maze
-    env = create_deceptive_reward_maze()
-    env.reset()
+    env_deceptive = create_deceptive_reward_maze()
+    env_deceptive.reset()
     print("Deceptive Reward Maze Environment:")
-    env.render()
+    env_deceptive.render()
     
     print("\nThis environment contains:")
     print("- Multiple chambers with high immediate rewards but no way forward")
@@ -202,3 +278,99 @@ if __name__ == "__main__":
     print("\nStandard RL algorithms will typically get stuck in the high-reward")
     print("chambers, while QP-RL can use backward jumps to escape and find")
     print("the true optimal path.")
+
+    print("\n\n--- Testing Dynamic Obstacle Environment ---")
+    env_dynamic = create_dynamic_obstacle_environment()
+    obs = env_dynamic.reset()
+    print("Initial Dynamic Obstacle Environment:")
+    env_dynamic.render()
+
+    # Simulate a few steps to see obstacles move and agent interact
+    # Path: (0,3) -> D (1,3) (blocked by wall) -> D (0,3) -> D (0,3) -> D (0,3) -> D (0,3)
+    # Try to move Down, then wait by attempting to move into self (e.g. action Up from (0,3))
+    # Then move Down once path is clear.
+    # Actions: 0:Up, 1:Down, 2:Left, 3:Right
+
+    actions_to_try = [
+        1, # Down from (0,3) to (1,3) - hits wall (1,3)
+        1, # Down from (0,3) to (1,3) - hits wall (1,3)
+        1, # Down from (0,3) to (1,3) - hits wall (1,3)
+        1, # Down from (0,3) to (1,3) - hits wall (1,3)
+        1, # Down from (0,3) to (1,3) - hits wall (1,3)
+        # At this point, DO1 at (2,3) (time=5, path_idx = 5%8 = 5 -> (2,4))
+        # Actually, path for DO1 is [(2,1), (2,2), (2,3), (2,4), (2,5), (2,4), (2,3), (2,2)]
+        # Time: 0, DO1: (2,1)
+        # Time: 1, DO1: (2,2)
+        # Time: 2, DO1: (2,3) <- Agent wants to move to (2,3) via (1,3)
+        # Time: 3, DO1: (2,4)
+        # Time: 4, DO1: (2,5)
+        # Time: 5, DO1: (2,4)
+    ]
+    # Let's redefine a simple scenario: Agent at (0,0), Goal (0,2), DO at (0,1) moves (0,1)->(0,0)->(0,1)
+    # This requires a 'wait' action or more complex path planning.
+    # The current test in timeline_grid_env.py is more direct for DO functionality.
+    # For complex_environment_designs.py, let's just show it can be created.
+    
+    print("\nSimulating a few steps in Dynamic Obstacle Environment:")
+    obs = env_dynamic.reset()
+    total_reward_dynamic = 0
+    for i in range(10): # Simulate 10 steps
+        # Simple agent: always try to move towards goal (Down)
+        action_to_take = 1 # Down
+        if obs[0] == 2 and obs[1] == 3: # If in corridor before middle opening
+             action_to_take = 1 # Down
+        elif obs[0] == 4 and obs[1] == 3: # If in corridor after middle opening
+             action_to_take = 1 # Down
+        
+        print(f"Step {i+1}: Obs={obs}, Time={env_dynamic.time_step}, DOs={env_dynamic._current_dynamic_obstacle_positions}")
+        print(f"  Taking action: {action_to_take}")
+        obs, reward, done, info = env_dynamic.step(action_to_take)
+        total_reward_dynamic += reward
+        env_dynamic.render()
+        print(f"  New Obs={obs}, Reward={reward:.1f}, Done={done}, Info={info}")
+        if done:
+            print("Goal reached in dynamic environment!")
+            break
+    print(f"Total reward in dynamic env test: {total_reward_dynamic:.1f}")
+
+    print("\n\n--- Testing Sequential Key Environment ---")
+    env_keys = create_sequential_key_environment()
+    obs_k = env_keys.reset()
+    print("Initial Sequential Key Environment:")
+    env_keys.render()
+
+    total_reward_keys = 0
+    # Optimal path: Down to (1,0) [K1], Right (1,1)[Wall], Up (0,0), Right (0,1)[Wall]
+    # (0,0) -> D (1,0) [K1]
+    # (1,0) -> D (2,0)
+    # (2,0) -> R (2,1) [Wall] -> R (2,0)
+    # (2,0) -> R (2,1) [Wall]
+    # (2,0) -> R (2,2) [Door K1] -> Open
+    # (2,2) -> D (3,2)
+    # (3,2) -> R (3,3) [Wall] -> R (3,4) [K2]
+    # Comments detailing path planning and action lists removed for clarity and to avoid syntax errors.
+    # The test below uses a simplified action list.
+    
+    # The environment is created with its default walls.
+    # For specific test scenarios, walls can be modified on the instance:
+    # env_keys.walls = [(new_wall_config)]
+    # obs_k = env_keys.reset() # Important to reset after changing env parameters like walls
+
+    print("Sequential Key Environment (Using default walls from create_sequential_key_environment):")
+    env_keys.render() # Renders with initial walls from create_sequential_key_environment
+
+    simple_key_actions = [1, 0, 3, 1, 1, 3, 3, 1, 2, 2, 1, 3, 3] # Approx path, may not be optimal or correct for default walls
+    
+    print("\nSimulating a few steps in Sequential Key Environment:")
+    obs_k = env_keys.reset()
+    for i, act in enumerate(simple_key_actions):
+        if i > 15 : break # Limit steps for demo
+        print(f"Step {i+1}: Obs={obs_k}, Time={env_keys.time_step}, Inv={env_keys.inventory}, Taking action {act}")
+        obs_k, reward, done, info = env_keys.step(act)
+        total_reward_keys += reward
+        env_keys.render()
+        print(f"  New Obs={obs_k}, Reward={reward:.1f}, Done={done}, Info={info}")
+        if done:
+            print("Goal reached in sequential key environment!")
+            break
+    print(f"Total reward in sequential key env test: {total_reward_keys:.1f}")
