@@ -1,102 +1,116 @@
 # Negative Probability in Reinforcement Learning
 
-A research implementation of Quasi-Probability Reinforcement Learning (QP-RL) that uses negative probabilities to enable bidirectional time dynamics in RL.
+A research implementation exploring the use of negative probabilities (quasi-probabilities) to enable bidirectional temporal navigation in reinforcement learning.
 
 ## Overview
 
-This project demonstrates how negative probabilities can open up new possibilities in reinforcement learning by allowing agents to selectively "jump backward" in time to previously visited states. The framework enables agents to:
+This project implements a novel **Temporal Quasi-Probability Reinforcement Learning (TQP-RL)** framework where agents maintain a probability distribution over state-time space with:
 
-1. Move forward in time (standard RL)
-2. Jump backward to revisit promising previous states
-3. Escape local optima more effectively
-4. Achieve faster convergence in complex environments
+- **Current state**: Probability = 1.0 (certainty of being "here and now")
+- **Future states**: Positive probabilities in an expanding cone
+- **Past states**: Negative probabilities in an expanding cone
 
-## Concept
+The key insight is treating the entire state-space-time as a navigable structure where agents can move both forward and backward in time by sampling from this quasi-probability distribution.
 
-Negative (or quasi) probabilities represent an extension to standard probability theory that has found applications in quantum mechanics and other fields. In our reinforcement learning context:
+## Core Concept
 
-- Positive Q-values represent "utility of future actions" (standard RL)
-- Negative Q-values represent "plausibility of past actions"
-- When a negative Q-value is sampled during action selection, the agent may jump back to a previous state
+Traditional RL agents can only move forward in time. Our framework introduces:
 
-This bidirectional time capability provides a novel approach to the exploration-exploitation trade-off in reinforcement learning.
+1. **Bidirectional Time Navigation**: Agents can navigate to both future states (positive probabilities) and past states (negative probabilities)
+2. **Computed Past States**: The system doesn't just remember visited states - it computes plausible past states that could have led to the current state
+3. **Quasi-Probability Distribution**: A distribution that sums to 1 but allows negative values, enabling a richer representation of temporal possibilities
+
+## Key Components
+
+### 1. Temporal Navigation Environment (`temporal_nav_env.py`)
+A physics-based grid world with:
+- State representation: (x, y, vx, vy, t) - position, velocity, and time
+- Reversible dynamics through physics laws
+- Methods to compute both successor and predecessor states
+- Actions apply forces, making the system naturally reversible
+
+### 2. Temporal QP Agent (`temporal_qp_agent.py`)
+An agent that:
+- Maintains a quasi-probability distribution over state-time space
+- Samples from this distribution to choose actions
+- Can jump backward to computed past states
+- Updates both future and past probabilities through learning
+
+### 3. Original Implementation (for comparison)
+- `qp_agent.py`: Original implementation with simpler backward jumping
+- `timeline_grid_env.py`: Grid environment with portals and time features
+- Standard baselines for comparison
 
 ## Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/negative_probability.git
+git clone https://github.com/systemshift/negative_probability.git
 cd negative_probability
 
 # Install the package
 pip install -e .
 ```
 
-## Project Structure
-
-- **qp_rl_project/**: Main package directory
-  - `qp_agent.py`: Core implementation of the QP-RL agent
-  - `standard_q_agent.py`: Standard Q-learning agent (baseline)
-  - `random_restart_q_agent.py`: Q-learning with random restarts (baseline)
-  - `timeline_grid_env.py`: Grid environment with time manipulation features
-  - `trap_grid_env.py`: Complex grid environment designed to showcase QP-RL benefits
-  - `run_experiments.py`: Comprehensive experimental framework
-  - `train_qp_agent.py`: Original training script for single agents
-
 ## Usage
 
-### Quick Test
+### Test the Temporal QP Framework
 
-Run a quick test comparing the QP-RL agent to a standard Q-learning agent:
+Run the comprehensive temporal quasi-probability experiment:
+
+```bash
+python test_temporal_qp.py
+```
+
+This will:
+1. Create a physics-based environment with obstacles
+2. Train both a Temporal QP agent and standard Q-learning agent
+3. Generate visualizations of the quasi-probability distribution
+4. Compare performance metrics
+5. Save results to `results/temporal_qp/`
+
+### Test the Original Implementation
+
+For comparison with the original approach:
 
 ```bash
 python test_qp_rl.py
 ```
 
-### Comprehensive Experiments
+## Results Interpretation
 
-Run comprehensive experiments with all agent types on different environments:
+The temporal QP framework demonstrates several advantages:
 
-```bash
-python -m qp_rl_project.run_experiments
-```
+1. **Faster Convergence**: By exploring both future and past possibilities
+2. **Better Exploration**: The backward jumps help escape local optima
+3. **Richer State Representation**: The quasi-probability distribution captures temporal relationships
 
-This will:
-1. Train all agent types on both standard and trap grid environments
-2. Generate comparative visualizations including reward plots, exploration metrics, and Q-value heatmaps
-3. Save results in the `results/` directory organized by environment type
+Key visualizations:
+- **Quasi-probability distributions**: Shows the expanding cones of future (positive) and past (negative) probabilities
+- **Performance comparison**: Learning curves comparing TQP-RL with standard Q-learning
+- **Jump dynamics**: How the agent uses backward time navigation
 
-## Results
+## Mathematical Foundation
 
-The most interesting comparison metrics include:
+The quasi-probability distribution P(s,t) satisfies:
+- ∑ P(s,t) = 1 (normalization)
+- P(s_current, t_current) = 1 (certainty)
+- P(s, t>t_current) > 0 (future states)
+- P(s, t<t_current) < 0 (past states)
 
-1. **Reward progression**: How quickly each agent type converges to optimal policies
-2. **Exploration efficiency**: How many unique states each agent visits during training
-3. **Jump dynamics**: How the QP-RL agent utilizes backward jumps over time
-4. **Escape from traps**: How effectively agents handle the trap areas in complex environments
+This allows the agent to navigate through time by sampling from |P(s,t)| and using the sign to determine direction.
 
-## Research Hypothesis
+## Future Work
 
-The main research hypothesis is that negative probabilities can effectively model bidirectional time in reinforcement learning, providing several key advantages:
+- Extend to continuous state/action spaces
+- Apply to more complex environments (Atari, robotics)
+- Explore connections to quantum mechanics and Feynman path integrals
+- Investigate applications in planning and counterfactual reasoning
 
-1. **Faster convergence** to optimal policies in environments with sparse rewards
-2. **Better exploration** capabilities in maze-like environments with potential traps
-3. **Escape local optima** more effectively than traditional exploration strategies
-4. **Complex decision-making** in environments where actions are partially reversible
+## Citation
 
-## Extending the Framework
-
-You can extend this framework by:
-
-1. Creating new environment types
-2. Implementing more advanced QP-RL variants
-3. Adding different baselines for comparison
-4. Testing with continuous state/action spaces
+If you use this code in your research, please cite our work (paper forthcoming).
 
 ## License
 
 This project is released under the MIT License.
-
-## Citation
-
-If you use this code in your research, please cite our work (paper details forthcoming).
