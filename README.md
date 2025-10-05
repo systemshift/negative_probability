@@ -1,116 +1,115 @@
-# Negative Probability in Reinforcement Learning
+# Quasi-Probability Reinforcement Learning
 
-A research implementation exploring the use of negative probabilities (quasi-probabilities) to enable bidirectional temporal navigation in reinforcement learning.
+A research implementation investigating the use of negative probabilities (quasi-probabilities) for counterfactual reasoning and bidirectional temporal navigation in reinforcement learning.
 
 ## Overview
 
-This project implements a novel **Temporal Quasi-Probability Reinforcement Learning (TQP-RL)** framework where agents maintain a probability distribution over state-time space with:
+This project explores whether **negative Q-values** can enable better learning through counterfactual reasoning - asking "what if I had acted differently?" without physically resetting the environment.
 
-- **Current state**: Probability = 1.0 (certainty of being "here and now")
-- **Future states**: Positive probabilities in an expanding cone
-- **Past states**: Negative probabilities in an expanding cone
+**Inspiration**: Feynman path integrals in quantum mechanics, where paths going "backward in time" contribute to probability amplitudes.
 
-The key insight is treating the entire state-space-time as a navigable structure where agents can move both forward and backward in time by sampling from this quasi-probability distribution.
+**Key Question**: Can RL agents benefit from reasoning about past decisions and hypothetical alternatives?
 
-## Core Concept
+## What's Included
 
-Traditional RL agents can only move forward in time. Our framework introduces:
+This repository contains:
 
-1. **Bidirectional Time Navigation**: Agents can navigate to both future states (positive probabilities) and past states (negative probabilities)
-2. **Computed Past States**: The system doesn't just remember visited states - it computes plausible past states that could have led to the current state
-3. **Quasi-Probability Distribution**: A distribution that sums to 1 but allows negative values, enabling a richer representation of temporal possibilities
+1. **`qp_rl_v2/`** - Clean, research-grade implementation
+   - Quasi-probability agents (with/without backward reasoning)
+   - Classical Q-learning baseline
+   - Test environments (trap mazes, corridors, four rooms)
+   - Visualization suite
+   - Experiment runner
 
-## Key Components
+2. **`qp_rl_project/`** - Original implementation (historical)
 
-### 1. Temporal Navigation Environment (`temporal_nav_env.py`)
-A physics-based grid world with:
-- State representation: (x, y, vx, vy, t) - position, velocity, and time
-- Reversible dynamics through physics laws
-- Methods to compute both successor and predecessor states
-- Actions apply forces, making the system naturally reversible
+3. **Documentation**:
+   - `THEORY.md` - Mathematical framework
+   - `INSIGHT.md` - Why counterfactual inference is hard
+   - `STATUS.md` - Project status and next steps
+   - `FINAL_SUMMARY.md` - Complete analysis and recommendations
 
-### 2. Temporal QP Agent (`temporal_qp_agent.py`)
-An agent that:
-- Maintains a quasi-probability distribution over state-time space
-- Samples from this distribution to choose actions
-- Can jump backward to computed past states
-- Updates both future and past probabilities through learning
+## Approaches Tested
 
-### 3. Original Implementation (for comparison)
-- `qp_agent.py`: Original implementation with simpler backward jumping
-- `timeline_grid_env.py`: Grid environment with portals and time features
-- Standard baselines for comparison
+### 1. Backward Jumps
+- Reset environment to past states
+- Try different actions with current knowledge
+- **Result**: -331% vs. classical Q-learning (wastes samples)
 
-## Installation
+### 2. Counterfactual Inference
+- Don't reset, just update beliefs about past
+- Infer "what if I had acted differently?"
+- **Result**: -355% vs. classical Q-learning (fabricates experience)
 
-```bash
-# Clone the repository
-git clone https://github.com/systemshift/negative_probability.git
-cd negative_probability
+### 3. Model-Based Extension (future work)
+- Learn dynamics model P(s'|s,a)
+- Use model for accurate counterfactuals
+- Could actually work!
 
-# Install the package
-pip install -e .
-```
+## Key Finding
 
-## Usage
+**Counterfactual reasoning in model-free RL is challenging** because you don't know what would have happened on alternative paths. Both backward jumps and pure inference corrupt learning.
 
-### Test the Temporal QP Framework
+However, this could work with:
+- Model-based RL (learned dynamics)
+- Simulators (can reset to any state)
+- Different applications (exploration bonuses, not action selection)
 
-Run the comprehensive temporal quasi-probability experiment:
-
-```bash
-python test_temporal_qp.py
-```
-
-This will:
-1. Create a physics-based environment with obstacles
-2. Train both a Temporal QP agent and standard Q-learning agent
-3. Generate visualizations of the quasi-probability distribution
-4. Compare performance metrics
-5. Save results to `results/temporal_qp/`
-
-### Test the Original Implementation
-
-For comparison with the original approach:
+## Quick Start
 
 ```bash
-python test_qp_rl.py
+# Install dependencies
+pip3 install numpy matplotlib --break-system-packages
+
+# Run main experiments (compares QP-RL vs. Classical)
+python3 run_experiments.py --episodes 500 --runs 3
+
+# Test counterfactual reasoning
+python3 test_counterfactual.py
+
+# Results saved to results_v2/
 ```
 
-## Results Interpretation
+## Experimental Results
 
-The temporal QP framework demonstrates several advantages:
+| Agent | Trap Maze Performance | Success Rate |
+|-------|----------------------|--------------|
+| Classical Q-Learning | 0.86 reward, 9 steps | 98% |
+| QP-RL (backward jumps) | -1.35 reward, 42 steps | 55% |
+| Counterfactual (inference) | -2.18 reward, 62 steps | 72% |
 
-1. **Faster Convergence**: By exploring both future and past possibilities
-2. **Better Exploration**: The backward jumps help escape local optima
-3. **Richer State Representation**: The quasi-probability distribution captures temporal relationships
+**Conclusion**: Quasi-probability approaches underperform classical Q-learning in model-free settings.
 
-Key visualizations:
-- **Quasi-probability distributions**: Shows the expanding cones of future (positive) and past (negative) probabilities
-- **Performance comparison**: Learning curves comparing TQP-RL with standard Q-learning
-- **Jump dynamics**: How the agent uses backward time navigation
+## Research Value
 
-## Mathematical Foundation
+Despite negative empirical results, this work contributes:
 
-The quasi-probability distribution P(s,t) satisfies:
-- ∑ P(s,t) = 1 (normalization)
-- P(s_current, t_current) = 1 (certainty)
-- P(s, t>t_current) > 0 (future states)
-- P(s, t<t_current) < 0 (past states)
+1. **Theoretical framework** for quasi-probabilities in RL
+2. **Rigorous experimental methodology** with proper baselines
+3. **Understanding of why** counterfactual reasoning is hard in model-free RL
+4. **Path forward**: Model-based extensions, different applications
 
-This allows the agent to navigate through time by sampling from |P(s,t)| and using the sign to determine direction.
+## Publication Potential
 
-## Future Work
+✅ **Workshop paper**: Negative results with theoretical contribution
+⚠️ **Conference paper**: Would need model-based extension or theoretical proofs
+✅ **Learning experience**: Research-quality codebase and methodology
 
-- Extend to continuous state/action spaces
-- Apply to more complex environments (Atari, robotics)
-- Explore connections to quantum mechanics and Feynman path integrals
-- Investigate applications in planning and counterfactual reasoning
+## Files
 
-## Citation
+- `qp_rl_v2/` - Main implementation
+- `THEORY.md` - Mathematical framework
+- `INSIGHT.md` - Analysis of challenges
+- `FINAL_SUMMARY.md` - Complete summary
+- `run_experiments.py` - Experiment runner
+- `test_counterfactual.py` - Test counterfactual approach
 
-If you use this code in your research, please cite our work (paper forthcoming).
+## Future Directions
+
+1. **Model-based RL**: Learn dynamics, use for counterfactuals
+2. **Different applications**: Exploration bonuses, not action selection
+3. **Theoretical analysis**: Convergence proofs, sample complexity
 
 ## License
 
-This project is released under the MIT License.
+MIT License
