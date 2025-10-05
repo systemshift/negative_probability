@@ -1,0 +1,16 @@
+Quasi-Probability RL Experiment Results
+==================================================
+
+Environment: Trap Maze (5x5)
+Episodes: 300
+Runs: 2
+
+QP-RL Results:
+  Avg Reward: -1.354 ± 0.049
+  Avg Steps: 41.7 ± 1.6
+
+Classical Q-Learning Results:
+  Avg Reward: 0.585 ± 0.035
+  Avg Steps: 11.3 ± 0.0
+
+Improvement: -331.3%
